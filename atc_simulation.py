@@ -3,6 +3,7 @@ import math
 import time
 from dataclasses import dataclass
 from typing import Tuple, List
+import numpy as np
 
 # Aircraft data structure
 @dataclass
@@ -21,13 +22,16 @@ class Aircraft:
     
     def move(self, dt):
         # Handle smooth turning with proper rate
-        if abs(self.heading - self.target_heading) > 1:
+        if abs(self.heading - self.target_heading) > 0.5:  # Reduced tolerance for more precise alignment
             # Calculate turn direction
             diff = (self.target_heading - self.heading + 360) % 360
             if diff > 180:
                 self.heading = (self.heading - TURN_RATE * dt + 360) % 360
             else:
                 self.heading = (self.heading + TURN_RATE * dt) % 360
+        else:
+            # Snap to exact target heading when very close
+            self.heading = self.target_heading
         
         # Move aircraft forward in current heading direction
         rad = math.radians((90 - self.heading) % 360)
@@ -52,10 +56,10 @@ PURPLE = (255, 0, 255)
 # Flight parameters
 LANDING_SPEED = 140  # Target landing speed in knots
 APPROACH_ALTITUDE = 3000  # Initial approach altitude in feet
-DESCENT_RATE = 20 * 5  # Increased for faster simulation
-DECELERATION = 0.5 * 5  # Increased for faster simulation
-TURN_RATE = 2.0 * 5  # Increased for faster simulation
-SPEED_MULTIPLIER = 0.005 * 5  # Increased for faster simulation
+DESCENT_RATE = 20 * 5 * 3  # Increased for faster simulation (15x original)
+DECELERATION = 0.5 * 5 * 3  # Increased for faster simulation (15x original)
+TURN_RATE = 2.0 * 5 * 3  # Increased for faster simulation (15x original)
+SPEED_MULTIPLIER = 0.005 * 5 * 3  # Increased for faster simulation (15x original)
 
 # Airport position (moved left)
 AIRPORT_X = WIDTH // 2 - 200
@@ -139,13 +143,7 @@ def draw_airport():
     number_rect.center = (runway_x + RUNWAY_LENGTH - 50, AIRPORT_Y)  # Moved left from -20 to -50
     screen.blit(rotated_text, number_rect)
     
-    # Draw marker at runway end
-    pygame.draw.circle(screen, RED, (int(RUNWAY_END_X), int(AIRPORT_Y)), 10)
-    
-    # Draw marker at turn point
-    pygame.draw.circle(screen, YELLOW, (int(BASE_TURN_X), int(AIRPORT_Y)), 10)
-    
-    # Removed blue downwind leg line
+    # Removed marker circles
 
 def get_landing_pattern_position(ac, phase):
     """Calculate positions for each phase of landing pattern"""
@@ -195,24 +193,38 @@ def redirect_aircraft(dt):
         if ac.landing_sequence > 0:
             # Determine aircraft phase based on position and heading
             if abs(ac.heading - 90) < 10:  # Flying east (downwind)
-                if ac.x > BASE_TURN_X:  # Using the new turn point
+                if ac.x > BASE_TURN_X:  # Using the turn point
                     # Aircraft has passed the turn point, turn to base
                     phase = "base_turn"
                 else:
                     phase = "downwind"
             elif abs(ac.heading - 180) < 10:  # Flying south (base)
+                # Check if aircraft has passed the centerline
                 if ac.y > AIRPORT_Y:
-                    # Aircraft has passed the centerline, turn to final
+                    # Custom phase with adjusted heading
                     phase = "final_turn"
+                    ac.target_heading = 270.0  # Turn to runway heading (west)
                 else:
                     phase = "base"
-            elif abs(ac.heading - 270) < 10:  # Flying west (final)
+            elif (abs(ac.heading - 270) < 10) or (ac.heading > 260 and ac.heading < 280):  # On final or correcting
+                # If aircraft is not aligned with centerline, make smaller corrections
+                if ac.y > AIRPORT_Y + 3:
+                    # Aircraft is below centerline, adjust heading slightly
+                    # Use smaller correction to ensure it eventually stabilizes at 270
+                    ac.target_heading = 268.0  # Slight right turn to get back to centerline
+                elif ac.y < AIRPORT_Y - 3:
+                    # Aircraft is above centerline, adjust heading slightly
+                    # Use smaller correction to ensure it eventually stabilizes at 270
+                    ac.target_heading = 272.0  # Slight left turn to get back to centerline
+                else:
+                    # Aircraft is aligned, force exact runway heading
+                    ac.target_heading = 270.0
                 phase = "final"
             else:
                 # In the middle of a turn, maintain current phase
                 if abs(ac.target_heading - 180) < 10:
                     phase = "base_turn"
-                elif abs(ac.target_heading - 270) < 10:
+                elif ac.heading > 180 and ac.heading < 270:
                     phase = "final_turn"
                 else:
                     phase = "downwind"
@@ -220,11 +232,18 @@ def redirect_aircraft(dt):
             # Get target parameters for current phase
             target = get_landing_pattern_position(ac, phase)
             
-            # Set target heading
-            ac.target_heading = target["heading"]
+            # Only update target heading if not in a special correction mode
+            if not (phase == "final_turn" and ac.y > AIRPORT_Y) and not (phase == "final" and abs(ac.y - AIRPORT_Y) > 3):
+                ac.target_heading = target["heading"]
             
-            # Debug information - comment out to reduce console spam
-            # print(f"{ac.callsign}: Phase={phase}, Heading={ac.heading:.1f}, Target={ac.target_heading}, Pos=({ac.x:.1f}, {ac.y:.1f})")
+            # Force exact 270 heading when very close to it and on final approach
+            if phase == "final" and abs(ac.heading - 270) < 2:
+                ac.heading = 270.0
+                ac.target_heading = 270.0
+            
+            # Debug information - uncomment to see alignment issues
+            # if phase == "final":
+            #     print(f"{ac.callsign}: Heading={ac.heading:.1f}, Y={ac.y:.1f}, Y-diff={ac.y-AIRPORT_Y:.1f}")
             
             # Set speed and altitude targets
             desired_speed = target["speed"]
@@ -243,22 +262,37 @@ def redirect_aircraft(dt):
                 ac.altitude = min(target_altitude, ac.altitude + DESCENT_RATE * dt / 2)  # Climb slower than descent
 
 def draw_aircraft(ac: Aircraft):
-    # Draw aircraft position - larger circle
-    pygame.draw.circle(screen, ac.color, (int(ac.x), int(ac.y)), 8)
+    # Calculate triangle points based on aircraft heading
+    # Triangle size
+    size = 12
     
-    # Draw heading line - longer
-    heading_length = 40
+    # Calculate the three points of the triangle
     rad = math.radians((90 - ac.heading) % 360)
-    end_x = ac.x + heading_length * math.cos(rad)
-    end_y = ac.y - heading_length * math.sin(rad)
-    pygame.draw.line(screen, ac.color, (ac.x, ac.y), (end_x, end_y), 3)
     
-    # Draw target heading line (for debugging) - longer
-    if ac.landing_sequence > 0:
-        target_rad = math.radians((90 - ac.target_heading) % 360)
-        target_end_x = ac.x + heading_length * 1.5 * math.cos(target_rad)
-        target_end_y = ac.y - heading_length * 1.5 * math.sin(target_rad)
-        pygame.draw.line(screen, GREEN, (ac.x, ac.y), (target_end_x, target_end_y), 2)
+    # Nose point (front of aircraft)
+    nose_x = ac.x + size * math.cos(rad)
+    nose_y = ac.y - size * math.sin(rad)
+    
+    # Left wing point
+    left_rad = math.radians((90 - ac.heading + 150) % 360)
+    left_x = ac.x + size * 0.7 * math.cos(left_rad)
+    left_y = ac.y - size * 0.7 * math.sin(left_rad)
+    
+    # Right wing point
+    right_rad = math.radians((90 - ac.heading - 150) % 360)
+    right_x = ac.x + size * 0.7 * math.cos(right_rad)
+    right_y = ac.y - size * 0.7 * math.sin(right_rad)
+    
+    # Draw the triangle
+    pygame.draw.polygon(screen, ac.color, [(nose_x, nose_y), (left_x, left_y), (right_x, right_y)])
+    
+    # Draw current heading line
+    heading_length = 40
+    current_end_x = ac.x + heading_length * math.cos(rad)
+    current_end_y = ac.y - heading_length * math.sin(rad)
+    pygame.draw.line(screen, ac.color, (ac.x, ac.y), (current_end_x, current_end_y), 2)
+    
+    # Removed green target heading line
     
     # Draw detailed aircraft information - larger font
     font = pygame.font.Font(None, 36)
